@@ -1,0 +1,339 @@
+---
+title: " Statistical Learning Final report"
+date: "June 11, 2017"
+geometry: "left=1.5cm,right=1.5cm,top=2.4cm,bottom=2cm"
+output: 
+  pdf_document: 
+    highlight: zenburn
+    latex_engine: xelatex
+---
+Abstract
+====================
+
+#Required packages : 
+
+##`devtools`,  `rmarkdown`,  `rpart`, `glmnet`,  `knitr`,  `readr`,  `stringr`,  `ggthemes`,  `ggplot2`,  `syuzhet`,  `SnowballC`,  `tm`,  `xgboost`
+
+##In this report, we will show the full process of text mining and data mining with procedure of model ensembling and predicting. This dataset is from the**Quora Question Pairs** Competition of Kaggle. (<https://www.kaggle.com/c/quora-question-pairs/data>) ,with the goal of identifying question pairs that have the same intent. The model includes the assembly of **XGboost**, **Logistic regression (glm)**, **CART**,and **C5.0**.
+
+\newpage
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+package = c("devtools","rmarkdown","rpart","C50","glmnet","knitr","readr",
+            "stringr","ggthemes","ggplot2","GGally","syuzhet","SnowballC",
+            "tm","xgboost")
+Already.Installed.Package = package %in% rownames(installed.packages())
+if(any(!Already.Installed.Package)) install.packages(package[!Already.Installed.Package])
+sapply(package, require, character.only = TRUE)
+```
+
+
+DATA PREPROCESSING
+====================
+
+```{r, echo=FALSE, message=FALSE, warning=TRUE}
+##
+#train.csv需到 https://www.kaggle.com/c/quora-question-pairs/data 下載
+#Training.csv可以從 https://www.dropbox.com/s/a45topjtwzsk9eh/Training.csv?dl=0 下載
+#Distance.csv可以從 https://www.dropbox.com/s/u0qw9qq5xdxmf4e/Distance.csv?dl=0 下載
+#NOTE:需先將下面三個csv黨放置C:下
+#第一分train在大迴圈中會跑很久，可直接跳過讀取Training.csv處理完成之資料
+#Distance情況亦相同
+#########################################
+trainPath = "C:\\train.csv"            ##
+DATAPath = "C:\\Training.csv"          ##
+DistancePath = "C:\\Distance.csv"      ##
+#########################################
+
+train = read_csv(trainPath)
+cat("number of rows:  ",dim(train)[1],"\nnumber of columns : ",dim(train)[2])
+```
+
+This dataset is from the Featured Prediction Competition of Kaggle, the **Quora Question Pairs** prediction testing dataset.(<https://www.kaggle.com/c/quora-question-pairs/data>)
+In this dataset,there are totally 404290 rows of sample question pairs.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+kable(head(train[,1:4]))
+kable(head(train[,5:6]))
+```
+
+
+- id - the id of a training set question pair
+- qid1, qid2 - unique ids of each question
+- question1, question2 - the full text of each question
+- is_duplicate - the target variable, set to 1 if question pairs have the same meaning, and 0 otherwise.
+            
+  Note that the qid1 and qid2 column represents the label of questions, indicating which question it is, and may occure again in different pairs of questions.
+
+  The main goal of this project is to predict weather or not the pairs of the question are duplicated. In this project, we will seperate the analysis into 2 parts, text processing and model analysis.
+## Text engineering 
+  Since it is a pair of sentence, it is obvious that we identify the string by "meaningful" words. Therefore for each rows, we will deal with 2 strings of sentence into 2 lists.
+
+  In this dataset analysis, the package `tm` was used to store the questions into **Corpus**, or sets of text. Below will demonstrate the work of one rows of question pairs. 
+
+**Stopwords**
+
+
+  Stopwords are words that are use to connect sentence in order to make the sentence complete, but are consider as noise in text mining. In the package words _who_, _what_, _when_, _where_, _why_, _how_, _which_ are included as Stopwords. Since it is a question pairs, I will include the 6 W'sas meaningful words.
+
+```{r}
+StopWord = stopwords("english") # import stopwords
+for (i in 1:length(stopwords("english"))){
+  if ( StopWord[i] %in% c("who","what","when","where","why","how","which") ){
+    StopWord[i] = NA
+  }
+}
+StopWord = as.character(na.exclude(StopWord))
+```
+
+Then we start decipher the question for each rows.
+
+```{r}
+#Initialize data frame to store outputs in each iteration
+Train = data.frame()    
+Train.row = data.frame()
+## Iteration starts ##
+# for (i in 1:nrow(train))
+i = 1
+q1 = Corpus(VectorSource(train$question1[i]))
+q2 = Corpus(VectorSource(train$question2[i]))
+```
+
+##Removing punctuations
+```{r}
+q1 = tm_map(q1, removePunctuation)   
+q2 = tm_map(q2, removePunctuation)
+```
+##Removing Numbers removeNumbers
+```{r}
+q1 = tm_map(q1, removeNumbers)
+q2 = tm_map(q2, removeNumbers)  
+```
+##To avoid duplicacy converting all to lower case tolower
+```{r}
+q1 = tm_map(q1, tolower)
+q2 = tm_map(q2, tolower) 
+```
+##Removing common word endings stemDocument
+```{r}
+q1 = tm_map(q1, stemDocument)
+q2 = tm_map(q2, stemDocument)
+```
+##Remove additional white space
+```{r}
+q1 = tm_map(q1, stripWhitespace)
+q2 = tm_map(q2, stripWhitespace)
+```
+##Removing Stop Words as they don't add any value
+```{r}
+q1 = tm_map(q1, removeWords, StopWord)
+q2 = tm_map(q2, removeWords, StopWord)
+```
+##Convert documents into text documents
+```{r}
+q1 = tm_map(q1, PlainTextDocument); q2 = tm_map(q2, PlainTextDocument)
+Q1 = TermDocumentMatrix(q1)$dimnames$Terms
+Q2 = TermDocumentMatrix(q2)$dimnames$Terms
+Q1;Q2
+```
+
+To this point, we can see that 2 Corpus are transformed into 2 list of dataset. In the usual text mining process, we will forn a TDM (term document matrix) and count the frequency and table the words for each rows and calculate the distance. However, this cause the problem that the sparsity of the data and therefore it is reasonable to calculate the "distance" of only the pairs of question; or as to say, the **Similarity** of each question pairs. We calculate intuitively  by the proportion of 2 list Q1 and Q2 matches.
+
+```{r}
+  same_items = sum(Q1 %in% Q2)
+  distinct_items = length(Q1) + length(Q2)
+  #distinct_items
+  match_count = (2*same_items)/(distinct_items)
+  cat("Proportion of matched words in pairs : ", match_count)
+```
+
+Now we form additional features by the package `syuzhet`. The function `get_nrc_sentiment` produce the table of words in a Corpus that belongs to certain categories of sentiment of data. For each category, we will calculate the proportion of the corresponding sentiments as an independent feature, and store the result into the data matrix.
+```{r}
+  sentiment1 = get_nrc_sentiment(train$question1[i])
+  sentiment2 = get_nrc_sentiment(train$question2[i])
+
+  if(sum(sentiment1)!= 0 ) sentiment1 = sentiment1/sum(sentiment1)
+  if(sum(sentiment2)!= 0 ) sentiment2 = sentiment2/sum(sentiment2)
+```
+```{r}
+  Q1_anger =  sum(sentiment1$anger)
+  Q1_anticipation =  sum(sentiment1$anticipation)
+  Q1_disgust =  sum(sentiment1$disgust)
+  Q1_fear =  sum(sentiment1$fear)
+  Q1_joy =  sum(sentiment1$joy)
+  Q1_sadness =  sum(sentiment1$sadness)
+  Q1_surprise =  sum(sentiment1$surprise)
+  Q1_trust =  sum(sentiment1$trust)
+  Q1_negative =  sum(sentiment1$negative)
+  Q1_positive =  sum(sentiment1$positive)
+  
+  Q2_anger =  sum(sentiment2$anger)
+  Q2_anticipation =  sum(sentiment2$anticipation)
+  Q2_disgust =  sum(sentiment2$disgust)
+  Q2_fear =  sum(sentiment2$fear)
+  Q2_joy =  sum(sentiment2$joy)
+  Q2_sadness =  sum(sentiment2$sadness)
+  Q2_surprise =  sum(sentiment2$surprise)
+  Q2_trust =  sum(sentiment2$trust)
+  Q2_negative =  sum(sentiment2$negative)
+  Q2_positive =  sum(sentiment2$positive)
+  Train.row = cbind(match_count,
+                 Q1_anger,Q1_anticipation,Q1_disgust,Q1_fear,Q1_joy,
+                 Q1_sadness,Q1_surprise,Q1_trust,Q1_negative,Q1_positive,
+                 Q2_anger,Q2_anticipation,Q2_disgust,Q2_fear,Q2_joy,
+                 Q2_sadness,Q2_surprise,Q2_trust,Q2_negative,Q2_positive)
+    Train = rbind.data.frame(Train,Train.row)
+```
+```{r}
+  i = i+1
+##End iteration
+```
+
+After the iterations, we will get the table, this the first row of our output data in the first part of data engineering
+```{r, echo=FALSE}
+kable(Train[,1:8],digits = 2)
+kable(Train[,9:16],digits = 2)
+kable(Train[,17:21],digits = 2)
+```
+
+Now, from the data, we observe the data's correlation
+```{r, include=FALSE}
+Training = read.csv(DATAPath)
+ggcorr(Training) + ggtitle("Correlation Plot") +theme_dark()
+
+```
+
+As we can see, the correlation are not high, and there are no connection between the 2 pairs of data in the sentiments feature, therefore, we would like to transform the feature pairs into one, selecting the intersection of the 2 pairs of questions. If there are same information in 2 questions, it is likely to have similar attributes in the corresponding sentiments. Therefore, we choose the minimum of each of the pairs of features. As an example, we pick the minimum of **Q1_joy** and **Q2_joy** and transform to a new feature **joy**.
+```{r}
+sentiment = get_nrc_sentiment(iconv(train$question1[1], "latin1", "ASCII", sub=""))
+#Compare and select the label that is intersected
+T_compared = pmin(as.matrix(Training[,3:12]),as.matrix(Training[,3:12]))
+#remake the data frame
+colnames(T_compared) = colnames(sentiment)
+DATA = cbind.data.frame(Match = Training$match_count,T_compared,Y = train$is_duplicate)
+#Resample
+set.seed(12)
+DATA = DATA[sample(nrow(DATA), nrow(DATA)), ]
+DATA[,1:11] = as.data.frame(DATA[,1:11])
+```
+```{r, fig.height=8, fig.width=6}
+ggcorr(DATA[,-12]) + ggtitle("Correlation Plot") + theme_economist()
+```
+Now, we can assemble another feature by calculating the distance between the sentiment. In the previous combination of sentiment, it is approximately the feature that indicate the gap, or absolute distance in between the same sentiment category between the pairs of question.
+$$\mbox{Distance} = \sqrt{\sum(Q_1sentiment -Q_2sentiment)^2}= \sqrt{\sum(sentiment)^2}$$
+```{r}
+Distance = matrix(matrix(0,nrow = nrow(DATA) ,ncol = 1))
+#for(x in 1:nrow(DATA)){
+  x = 7
+  Distance[x,1] =sum((DATA[x,2:11])^2)
+  print(Distance[x,1])
+#  print(x)
+#}
+#Distance = sqrt(Distance)
+#write.csv( Distance,"C:\\Distance.csv")
+Distance = read.csv(DistancePath)
+DATA = cbind.data.frame(DATA, Distance = Distance$V1)
+ggcorr(DATA[,-12]) + ggtitle("Correlation Plot") + theme_pander()
+
+```
+In additional, we apply the negative sentiment with an additional negative sign.
+```{r, echo=FALSE}
+DATA$anger = (-1)*DATA$anger
+DATA$disgust = (-1)*DATA$disgust
+DATA$fear = (-1)*DATA$fear
+DATA$sadness = (-1)*DATA$sadness
+DATA$negative = (-1)*DATA$negative
+kable(head(DATA),digits = 2)
+```
+
+Note that for better analysis, we take into consideration that spasity is significant in the sentiment category.
+```{r, echo=FALSE}
+S = subset(data.matrix(table(DATA$anger)),data.matrix(table(DATA$anger))[,1]>10)
+X = c(as.numeric(rownames(S)))
+Count = data.frame(S)$S
+ ggplot(cbind.data.frame(X,Count), aes(x=X,y = Count))+
+ geom_bar(stat="identity", fill="steelblue") + theme_wsj()
+```
+
+DATA MODELING AND PPREDICTION
+====================
+
+##Introduction to XGBoost
+  XGBoost stands for **E**xtreme **G**radient **Boost**ing. It is a supervised learning algorithm. It is a library for developing fast and high performance gradient boosting tree models. Parallel computation behind the scenes is what makes it this fast. It has been very popular in recent years due to its versatiltiy, scalability and efficiency.
+Like any other ML algorithm, this too has its own pros and cons. But fortunately pros easily outweigh cons given we have an astute understanding of the algorithm and an intuition for proper parameter tuning. This has been proven by its huge popularity on Kaggle.
+
+In `DATA`, we cut the first 250000 rows as training set and the rest 154289 rows as testing dataset.
+```{r}
+#Seperate into training and testing data
+Label_train = c(data.matrix(DATA$Y[1:250000]))
+Label_test = as.factor(DATA$Y[250001:404290])
+X_train = DATA[1:250000,c(1:11,13)]
+X_test = DATA[250001:404290,c(1:11,13)]
+```
+
+For the modeling, since it is a binary classification problem, I choose to blend 4 models : **XGboost**, **Logistic regression (glm)**, **CART**,and **C5.0**.
+
+#Training and validation of XGBoost
+```{r XGboost_training, include=FALSE}
+XGBModel = xgboost(data = data.matrix(X_train), label =Label_train, nthread = 8, nround = 2000, objective = "binary:logistic")
+```
+##XGBoost
+```{r, fig.height = 3 }
+IMP = xgb.importance(colnames(DATA), model = XGBModel)
+IMP = IMP[order(IMP$Cover,decreasing = TRUE),]
+IMP = as.data.frame(IMP)
+qplot(x = c(1:length(IMP$Gain)),y = IMP$Cover, xlab = "Variable", ylab = "Gain") + 
+ggtitle("Importance Plot") + geom_line() + theme_economist() 
+predict_XGB = predict(XGBModel, data.matrix(X_test))
+prediction_XGB = as.numeric(predict_XGB > 0.5)
+Table_XGB = table(prediction_XGB,Label_test)
+Accruacy_XGB = sum(diag(Table_XGB))/sum(Table_XGB)
+
+```
+##Logistic regression
+```{r}
+GLMModel = glm(Label_train ~., family=binomial(link='logit'),data = X_train)
+pred_GLM = predict(GLMModel, X_test)
+prediction_GLM = as.numeric(pred_GLM > 0.5)
+Accruacy_GLM = sum( prediction_GLM == Label_test ) / length( prediction_GLM )
+```
+##CART classification tree
+```{r}
+CRTModel = rpart(as.factor(Label_train)~.,data=X_train)
+pred_CRT = predict(CRTModel, X_test, type = "class")
+prediction_CRT = as.numeric(as.matrix(pred_CRT))
+Accruacy_CRT = sum( prediction_CRT == Label_test ) / length( prediction_CRT )
+```
+##C5.0 boosting tree
+```{r}
+C50Model = C5.0(as.factor(Label_train)~ . ,data=X_train , trials=50)
+prediction_C50 = predict(C50Model, X_test, type = "class")
+Accruacy_C50 = sum( prediction_C50 == Label_test ) / length( prediction_C50 )
+```
+
+#Ensembling models
+##Now after the training of the above models, we ensemble the model by voting the testing set and categorize it as 1 if more than 2 model picked as category 1.
+```{r}
+Vote = as.numeric(prediction_XGB) + 
+  as.numeric(prediction_GLM) + 
+  as.numeric(prediction_CRT) + 
+  as.numeric(prediction_C50) -1
+prediction_Vote = as.numeric(Vote > 2)
+Ensembled_Accruacy = sum( prediction_Vote == Label_test ) / length(prediction_Vote)
+```
+
+This is the final result in compairson.
+```{r, echo=FALSE}
+FinalTable = cbind.data.frame(Ensembled_Accruacy, Accruacy_XGB, Accruacy_GLM,
+                              Accruacy_CRAT=Accruacy_CRT, Accruacy_C50)
+kable(FinalTable)
+```
+
+
+From the result, we can see that the perfoemance of XGBoost is the best of the 4 methods. The performance of the models are nearly as powerful, XGBoost conducted 2000 iterations (trees). taking much longer than the other 3 models but with only slightly better performance.
+\newpage
+
+#Reference
+1. <http://machinelearningmastery.com/gentle-introduction-xgboost-applied-machine-learning/>
+2. An Introduction to Statistical Learning with Applications in R.Hastie, Tibshirani and Friedman.
+3. The Elements of Statistical Learning (2nd edition).Hastie, Tibshirani and Friedman .
